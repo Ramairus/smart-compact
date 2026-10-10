@@ -1,0 +1,33 @@
+{
+  "name": "smart-auto-compact",
+  "version": "0.1.0",
+  "description": "Lets Claude compact its own context with your approval, and adds its keep rules to every compaction.",
+  "author": {
+    "name": "Hoshin"
+  },
+  "license": "MIT",
+  "keywords": [
+    "compact",
+    "context",
+    "compaction"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "grantCheck": {
+      "type": "string",
+      "title": "Grant check",
+      "description": "judge: before each compaction under a grant, the session model judges from the conversation whether the grant still covers the current work. trust: an active grant always applies.",
+      "options": [
+        "judge",
+        "trust"
+      ],
+      "default": "judge"
+    },
+    "grantMaxTurns": {
+      "type": "number",
+      "title": "Grant lifetime (turns)",
+      "description": "Turns after which a grant lapses whatever the judge says; 0 for no limit.",
+      "default": 30
+    }
+  }
+}

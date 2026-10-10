@@ -1,0 +1,12 @@
+{
+  "name": "smart-auto-compact",
+  "owner": { "name": "Hoshin" },
+  "description": "Claude Code plugin for approved self-compaction with consistent keep rules.",
+  "plugins": [
+    {
+      "name": "smart-auto-compact",
+      "source": "./",
+      "description": "Lets Claude compact its own context with your approval, and adds its keep rules to every compaction."
+    }
+  ]
+}
