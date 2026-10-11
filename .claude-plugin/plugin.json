@@ -1,6 +1,6 @@
 {
   "name": "smart-auto-compact",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Lets Claude compact its own context with your approval, and adds its keep rules to every compaction.",
   "author": {
     "name": "Ramairus"

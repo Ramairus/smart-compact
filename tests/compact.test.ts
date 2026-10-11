@@ -173,9 +173,10 @@ test('tool rows clip long inputs to their first line', () => {
   expect(clip('Short.')).toBe('Short.')
   expect(clip('Line one.\nLine two.')).toBe('Line one.…')
   expect(clip('a'.repeat(60))).toBe(`${'a'.repeat(48)}…`)
-  expect(shortInput('mcp__smart-auto-compact__request_grant', { scope: 'One.\nTwo.', label: 'bundles' })).toEqual({
-    scope: 'One.…',
-    label: 'bundles',
+  expect(shortInput('mcp__smart-auto-compact__set_compact_brief', { instructions: 'Long brief.' })).toEqual({})
+  expect(shortInput('mcp__smart-auto-compact__request_grant', { scope: 'One.', label: 'bundles' })).toEqual({ label: 'bundles' })
+  expect(shortInput('mcp__smart-auto-compact__compact', { instructions: 'x', reason: 'Phase done.\nMore.' })).toEqual({
+    reason: 'Phase done.…',
   })
 })
 
@@ -199,4 +200,28 @@ test('reminds Claude to refresh a stale brief', { options: { briefReminderCalls:
   expect((await $.tool.call(READ)).context).toBeUndefined()
   expect((await $.tool.call(READ)).context?.[0]).toContain('saved 2 tool calls ago')
   expect((await $.tool.call(READ)).context).toBeUndefined()
+})
+
+const PANE = {
+  component: 'Pane',
+  requestId: 'compact-brief',
+  props: {
+    title: 'Compact brief',
+    isFocused: true,
+    bodyColumns: 80,
+    placement: 'inline',
+    scroll: { offset: 0, bodyRows: 20 },
+    view: {},
+  },
+} as const
+
+test('the brief pane shows the saved brief on every surface', async ($, on) => {
+  engine(on)
+  await $.tool.call({ tool: 'mcp__smart-auto-compact__set_compact_brief', instructions: 'Bundle 4 of 16.' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'smart-auto-compact', surface, ...PANE })
+    expect(await ui.find({ type: 'Text', text: /Bundle 4 of 16/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No compact grant/ })).toBeDefined()
+    await ui.unmount()
+  }
 })

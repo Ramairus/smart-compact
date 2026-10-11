@@ -102,12 +102,15 @@ export function clip(text: string, max = 48): string {
   return line.length > max || line !== whole ? `${line.slice(0, max).trimEnd()}…` : line
 }
 
-// What the call row of one of our tools shows: long inputs clipped. The full text goes to the
-// result row, which the transcript folds to its first lines until ctrl+o.
+export const BRIEF_COMMAND = 'compact-brief'
+const SHOW = `/${BRIEF_COMMAND} to show`
+
+// What the call row of one of our tools shows: the tool's name, and for compact and
+// request_grant one short field. Briefs, scopes and instructions are read in the pane.
 export function shortInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...input }
-  for (const key of ['instructions', 'scope', 'resume']) if (typeof out[key] === 'string') out[key] = clip(out[key])
-  return out
+  if (tool.endsWith('__compact') && typeof input.reason === 'string') return { reason: clip(input.reason) }
+  if (tool.endsWith('__request_grant') && typeof input.label === 'string') return { label: input.label }
+  return {}
 }
 
 // The tool's output with its text replaced for display, or undefined when the shape is unknown.
@@ -123,6 +126,7 @@ export function withDisplayText(output: unknown, text: string): unknown {
 
 const SHOWN_KEEP = 50
 
+// The one line a call's result row shows in place of the model's result.
 async function remember($: EngineInterface, id: string | undefined, text: string) {
   if (!id) return
   await update($, shown, map => Object.fromEntries([...Object.entries(map), [id, text]].slice(-SHOWN_KEEP)))
@@ -284,6 +288,11 @@ export const register: Register = (on, options) => {
       inputSchema: { type: 'object', properties: {} },
       isDeferred: false,
     })
+    await $.command.register({
+      name: BRIEF_COMMAND,
+      description: "Show Claude's task brief and the compact grant in a pane",
+      immediate: true,
+    })
     showStatus($, await read($, grant))
     // Off the start path: the question waits for the UI, and /autocompact for an idle session.
     $.clock.after(1500, () => offerWindow($).catch(error => $.ui.log(`${PLUGIN}: window offer failed: ${String(error)}`)))
@@ -320,8 +329,7 @@ export const register: Register = (on, options) => {
     const turn = await read($, turns)
     await update($, brief, () => ({ instructions: input.instructions, turn }))
     await update($, sinceBrief, () => 0)
-    const resume = input.resume ? `\n\nResume: ${input.resume}` : ''
-    await remember($, e.tool_use_id, `Compaction queued: ${input.reason}\n\n${input.instructions}${resume}`)
+    await remember($, e.tool_use_id, `Compaction queued · ${SHOW}`)
     return {
       result:
         'Compaction queued for the end of this turn. End the turn now' +
@@ -334,7 +342,7 @@ export const register: Register = (on, options) => {
     const turn = await read($, turns)
     await update($, brief, () => ({ instructions, turn }))
     await update($, sinceBrief, () => 0)
-    await remember($, e.tool_use_id, `Brief saved.\n\n${instructions}`)
+    await remember($, e.tool_use_id, `Brief saved · ${SHOW}`)
     return { result: 'Brief saved. The next compaction keeps it, including an autocompact mid-turn.' }
   })
 
@@ -354,7 +362,7 @@ export const register: Register = (on, options) => {
     const held: Grant = { scope, label, source: 'user', turn: await read($, turns) }
     await setGrant($, held)
     await update($, sinceBrief, () => 0)
-    await remember($, e.tool_use_id, `Compact grant active: ${grantLabel(held)}\n\nScope: ${scope}`)
+    await remember($, e.tool_use_id, `Grant active · ${SHOW}`)
     return { result: `Compact grant active: ${grantLabel(held)}. Keep the task brief current with set_compact_brief.` }
   })
 
@@ -391,6 +399,36 @@ export const register: Register = (on, options) => {
     const output = text === undefined ? undefined : withDisplayText(e.props.output, text)
     return output === undefined ? next(e) : next({ ...e, props: { ...e.props, output } })
   }).catch(($, e, next) => next(e))
+
+  // A pane, not command output: the model reads a command's text, and the brief is already its own.
+  on('command.run', { command: BRIEF_COMMAND }, async $ => {
+    await $.ui.open({ id: BRIEF_COMMAND, title: 'Compact brief', focus: true, closeOnEscape: true })
+    return {}
+  })
+
+  on('ui.render', { component: 'Pane', requestId: BRIEF_COMMAND }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const [saved, held, now] = [await read($, brief), await read($, grant), await read($, turns)]
+    return (
+      <Box flexDirection="column">
+        {held ? (
+          <Text>
+            <Text bold>Grant: </Text>
+            {held.scope}
+          </Text>
+        ) : (
+          <Text dimColor>No compact grant is active.</Text>
+        )}
+        <Text> </Text>
+        {saved?.instructions.trim() ? (
+          <Text>{briefSection(saved, now)}</Text>
+        ) : (
+          <Text dimColor>No task brief is saved.</Text>
+        )}
+        <Text dimColor>Esc to close</Text>
+      </Box>
+    )
+  })
 
   on('skill.prompt', async ($, e, next) => {
     const out = await next(e)
