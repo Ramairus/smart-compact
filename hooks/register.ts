@@ -11,6 +11,10 @@ const brief = atom({ plugin: 'smart-auto-compact', key: 'brief' } as const, null
 const pending = atom({ plugin: 'smart-auto-compact', key: 'pending' } as const, null as PendingCompact | null)
 const skills = atom({ plugin: 'smart-auto-compact', key: 'skills' } as const, [] as string[])
 const turns = atom({ plugin: 'smart-auto-compact', key: 'turns' } as const, 0)
+// Main-loop tool calls since the brief was last saved.
+const sinceBrief = atom({ plugin: 'smart-auto-compact', key: 'sinceBrief' } as const, 0)
+// The full text each of our tool rows shows under ctrl+o, by tool_use_id.
+const shown = atom({ plugin: 'smart-auto-compact', key: 'shown' } as const, {} as Record<string, string>)
 
 const SKILL_PERMISSION = /^\s*compact-permission:\s*granted\s*$/im
 const RETRIES = 5
@@ -76,9 +80,58 @@ export function judgePrompt(held: Grant, age: number, reason: string): string {
   ].join('\n')
 }
 
+// At most four words; a grant saved before labels existed falls back to its scope.
+export function grantLabel(held: Grant): string {
+  const words = (held.label?.trim() || held.scope).split(/\s+/).filter(Boolean)
+  return words.slice(0, 4).join(' ') + (words.length > 4 ? '…' : '')
+}
+
+function showStatus($: EngineInterface, held: Grant | null) {
+  $.ui.status(held ? `compact grant: ${grantLabel(held)}` : undefined)
+}
+
 async function setGrant($: EngineInterface, next: Grant | null) {
   await update($, grant, () => next)
-  $.ui.status(next ? 'free-ride' : undefined)
+  showStatus($, next)
+}
+
+// The first line of a long input, cut short for the tool row.
+export function clip(text: string, max = 48): string {
+  const whole = text.trim()
+  const line = whole.split('\n')[0]!
+  return line.length > max || line !== whole ? `${line.slice(0, max).trimEnd()}…` : line
+}
+
+// What the call row of one of our tools shows: long inputs clipped. The full text goes to the
+// result row, which the transcript folds to its first lines until ctrl+o.
+export function shortInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...input }
+  for (const key of ['instructions', 'scope', 'resume']) if (typeof out[key] === 'string') out[key] = clip(out[key])
+  return out
+}
+
+// The tool's output with its text replaced for display, or undefined when the shape is unknown.
+export function withDisplayText(output: unknown, text: string): unknown {
+  if (typeof output === 'string') return text
+  const blocks = Array.isArray(output) ? output : (output as { content?: unknown } | null)?.content
+  if (!Array.isArray(blocks)) return undefined
+  const first = blocks.findIndex(b => b?.type === 'text')
+  if (first < 0) return undefined
+  const next = blocks.flatMap((b, i) => (b?.type !== 'text' ? [b] : i === first ? [{ ...b, text }] : []))
+  return Array.isArray(output) ? next : { ...(output as object), content: next }
+}
+
+const SHOWN_KEEP = 50
+
+async function remember($: EngineInterface, id: string | undefined, text: string) {
+  if (!id) return
+  await update($, shown, map => Object.fromEntries([...Object.entries(map), [id, text]].slice(-SHOWN_KEEP)))
+}
+
+export function briefReminder(calls: number, hasBrief: boolean): string {
+  return hasBrief
+    ? `[smart-auto-compact] Your task brief was saved ${calls} tool calls ago. If the work has moved on since (a step finished, a decision made, a new next step), replace it now with set_compact_brief; otherwise carry on.`
+    : '[smart-auto-compact] A compact grant is active but no task brief is saved. Save one now with set_compact_brief so an autocompact keeps the task state.'
 }
 
 // Whether the grant still covers this compaction: past its age limit it lapses, otherwise
@@ -99,6 +152,7 @@ async function grantStands(
 }
 
 async function afterCompaction($: EngineInterface) {
+  await update($, sinceBrief, () => 0)
   const loaded = await read($, skills)
   const note = [
     'The conversation was just compacted.',
@@ -177,6 +231,7 @@ export const register: Register = (on, options) => {
     grantCheck: String(options.grantCheck ?? 'judge'),
     grantMaxTurns: Number(options.grantMaxTurns ?? 30),
   }
+  const briefEvery = Number(options.briefReminderCalls ?? 25)
 
   on('session.start', async ($, e, next) => {
     await $.tool.register({
@@ -201,7 +256,7 @@ export const register: Register = (on, options) => {
       name: 'set_compact_brief',
       description:
         'Saves what any later compaction must keep (task, progress, decisions, next step), without compacting. ' +
-        'Used by autocompact, which can run mid-turn, and by /compact. Replace it at each phase boundary.',
+        'Used by autocompact, which can run mid-turn, and by /compact. Replace it whenever a step finishes or a decision is made.',
       inputSchema: {
         type: 'object',
         properties: { instructions: { ...STRING, description: 'The current task state, as for compact.' } },
@@ -215,8 +270,11 @@ export const register: Register = (on, options) => {
         'Asks the user, ahead of a large task, for permission to compact without asking each time until release_grant.',
       inputSchema: {
         type: 'object',
-        properties: { scope: { ...STRING, description: 'The task the grant covers.' } },
-        required: ['scope'],
+        properties: {
+          scope: { ...STRING, description: 'The task the grant covers.' },
+          label: { ...STRING, description: 'Three or four words naming that task, for the status line.' },
+        },
+        required: ['scope', 'label'],
       },
       isDeferred: false,
     })
@@ -226,8 +284,7 @@ export const register: Register = (on, options) => {
       inputSchema: { type: 'object', properties: {} },
       isDeferred: false,
     })
-    const held = await read($, grant)
-    $.ui.status(held ? 'free-ride' : undefined)
+    showStatus($, await read($, grant))
     // Off the start path: the question waits for the UI, and /autocompact for an idle session.
     $.clock.after(1500, () => offerWindow($).catch(error => $.ui.log(`${PLUGIN}: window offer failed: ${String(error)}`)))
     return next(e)
@@ -262,6 +319,9 @@ export const register: Register = (on, options) => {
     await update($, pending, () => job)
     const turn = await read($, turns)
     await update($, brief, () => ({ instructions: input.instructions, turn }))
+    await update($, sinceBrief, () => 0)
+    const resume = input.resume ? `\n\nResume: ${input.resume}` : ''
+    await remember($, e.tool_use_id, `Compaction queued: ${input.reason}\n\n${input.instructions}${resume}`)
     return {
       result:
         'Compaction queued for the end of this turn. End the turn now' +
@@ -273,11 +333,13 @@ export const register: Register = (on, options) => {
     const { instructions } = e as unknown as { instructions: string }
     const turn = await read($, turns)
     await update($, brief, () => ({ instructions, turn }))
+    await update($, sinceBrief, () => 0)
+    await remember($, e.tool_use_id, `Brief saved.\n\n${instructions}`)
     return { result: 'Brief saved. The next compaction keeps it, including an autocompact mid-turn.' }
   })
 
   on('tool.call', { tool: `mcp__${PLUGIN}__request_grant` }, async ($, e) => {
-    const { scope } = e as unknown as { scope: string }
+    const { scope, label } = e as unknown as { scope: string; label?: string }
     if (await read($, grant)) return { result: 'A compact grant is already active.' }
     let answer: string
     try {
@@ -289,14 +351,46 @@ export const register: Register = (on, options) => {
       return { deny: 'The user dismissed the grant request.' }
     }
     if (answer !== 'Allow') return { deny: `Not granted. The user answered: ${answer}` }
-    await setGrant($, { scope, source: 'user', turn: await read($, turns) })
-    return { result: `Compact grant active for: ${scope}` }
+    const held: Grant = { scope, label, source: 'user', turn: await read($, turns) }
+    await setGrant($, held)
+    await update($, sinceBrief, () => 0)
+    await remember($, e.tool_use_id, `Compact grant active: ${grantLabel(held)}\n\nScope: ${scope}`)
+    return { result: `Compact grant active: ${grantLabel(held)}. Keep the task brief current with set_compact_brief.` }
   })
 
   on('tool.call', { tool: `mcp__${PLUGIN}__release_grant` }, async $ => {
     await setGrant($, null)
     return { result: 'Compact grant released.' }
   })
+
+  // While a grant is active or a brief is saved, every briefEvery main-loop tool calls the model
+  // gets a reminder, which the user never sees, to bring its brief up to date.
+  on('tool.call', async ($, e, next) => {
+    const out = await next(e)
+    if (briefEvery <= 0 || e.agentId || out.deny !== undefined || e.tool.startsWith(`mcp__${PLUGIN}__`)) return out
+    const saved = await read($, brief)
+    if (!saved && !(await read($, grant))) return out
+    const calls = (await read($, sinceBrief)) + 1
+    if (calls < briefEvery) {
+      await update($, sinceBrief, () => calls)
+      return out
+    }
+    await update($, sinceBrief, () => 0)
+    return { ...out, context: [...(out.context ?? []), briefReminder(calls, saved !== null)] }
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
+    const { tool, input } = e.props
+    if (!tool.startsWith(`mcp__${PLUGIN}__`) || typeof input !== 'object' || !input) return next(e)
+    return next({ ...e, props: { ...e.props, input: shortInput(tool, input as Record<string, unknown>) } })
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    if (!e.props.tool.startsWith(`mcp__${PLUGIN}__`) || e.props.isErrored) return next(e)
+    const text = (await read($, shown))[e.props.tool_use_id]
+    const output = text === undefined ? undefined : withDisplayText(e.props.output, text)
+    return output === undefined ? next(e) : next({ ...e, props: { ...e.props, output } })
+  }).catch(($, e, next) => next(e))
 
   on('skill.prompt', async ($, e, next) => {
     const out = await next(e)
@@ -306,7 +400,7 @@ export const register: Register = (on, options) => {
       const source = `skill:${e.skill}`
       // A skill grants when none is active, and renews its own grant when loaded again.
       if (!held || held.source === source) {
-        await setGrant($, { scope: `skill ${e.skill}`, source, turn: await read($, turns) })
+        await setGrant($, { scope: `skill ${e.skill}`, label: e.skill, source, turn: await read($, turns) })
         if (!held) $.ui.toast(`Compact permission granted by skill ${e.skill}`)
       }
     }

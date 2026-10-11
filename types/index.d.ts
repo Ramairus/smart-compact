@@ -1,5 +1,6 @@
 // `turn` is the main-loop turn count when the grant was given or renewed.
-export type Grant = { scope: string; source: string; turn: number }
+// `label` is the three or four words the status line shows.
+export type Grant = { scope: string; label?: string; source: string; turn: number }
 
 // Claude's own account of the task, merged into compactions it did not request itself.
 export type Brief = { instructions: string; turn: number }
@@ -14,6 +15,8 @@ declare module 'claude-code' {
       pending: PendingCompact | null
       skills: string[]
       turns: number
+      sinceBrief: number
+      shown: Record<string, string>
     }
   }
 }

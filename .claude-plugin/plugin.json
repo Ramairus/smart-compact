@@ -1,9 +1,9 @@
 {
   "name": "smart-auto-compact",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lets Claude compact its own context with your approval, and adds its keep rules to every compaction.",
   "author": {
-    "name": "Hoshin"
+    "name": "Ramairus"
   },
   "license": "MIT",
   "keywords": [
@@ -28,6 +28,12 @@
       "title": "Grant lifetime (turns)",
       "description": "Turns after which a grant lapses whatever the judge says; 0 for no limit.",
       "default": 30
+    },
+    "briefReminderCalls": {
+      "type": "number",
+      "title": "Brief reminder (tool calls)",
+      "description": "While a grant is active or a brief is saved, remind Claude every this many tool calls to bring its task brief up to date; 0 to turn off.",
+      "default": 25
     }
   }
 }

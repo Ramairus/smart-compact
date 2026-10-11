@@ -1,7 +1,18 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { alwaysKeep, briefSection, composeInstructions, kTokens, parseVerdict, windowChoices } from '../hooks/register'
+import {
+  alwaysKeep,
+  briefSection,
+  clip,
+  composeInstructions,
+  grantLabel,
+  kTokens,
+  parseVerdict,
+  shortInput,
+  windowChoices,
+  withDisplayText,
+} from '../hooks/register'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
 
@@ -151,4 +162,41 @@ test('offers up to two windows below the current one', () => {
   expect(windowChoices(120_000)).toEqual([100_000])
   expect(windowChoices(100_000)).toEqual([])
   expect(kTokens(150_000)).toBe('150k')
+})
+
+test('a grant label is at most four words', () => {
+  expect(grantLabel({ scope: 'x', label: 'gradle-port bundles', source: 'user', turn: 0 })).toBe('gradle-port bundles')
+  expect(grantLabel({ scope: 'Execute the whole gradle-port bundle set', source: 'user', turn: 0 })).toBe('Execute the whole gradle-port…')
+})
+
+test('tool rows clip long inputs to their first line', () => {
+  expect(clip('Short.')).toBe('Short.')
+  expect(clip('Line one.\nLine two.')).toBe('Line one.…')
+  expect(clip('a'.repeat(60))).toBe(`${'a'.repeat(48)}…`)
+  expect(shortInput('mcp__smart-auto-compact__request_grant', { scope: 'One.\nTwo.', label: 'bundles' })).toEqual({
+    scope: 'One.…',
+    label: 'bundles',
+  })
+})
+
+test('display text replaces the first text block and drops the rest', () => {
+  expect(withDisplayText('saved', 'full')).toBe('full')
+  expect(withDisplayText([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }], 'full')).toEqual([{ type: 'text', text: 'full' }])
+  expect(withDisplayText({ content: [{ type: 'text', text: 'a' }], isError: false }, 'full')).toEqual({
+    content: [{ type: 'text', text: 'full' }],
+    isError: false,
+  })
+  expect(withDisplayText({ other: 1 }, 'full')).toBeUndefined()
+})
+
+const READ = { tool: 'Read', file_path: 'a.ts' } as const
+
+test('reminds Claude to refresh a stale brief', { options: { briefReminderCalls: 2 } }, async ($, on) => {
+  engine(on)
+  on('tool.call', (_$, e) => (e.tool === 'Read' ? { result: 'file' } : { deny: 'unexpected' }))
+  expect((await $.tool.call(READ)).context).toBeUndefined()
+  await $.tool.call({ tool: 'mcp__smart-auto-compact__set_compact_brief', instructions: 'Step 1 of 3.' })
+  expect((await $.tool.call(READ)).context).toBeUndefined()
+  expect((await $.tool.call(READ)).context?.[0]).toContain('saved 2 tool calls ago')
+  expect((await $.tool.call(READ)).context).toBeUndefined()
 })

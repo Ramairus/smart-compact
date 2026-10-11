@@ -1,6 +1,6 @@
 {
   "name": "smart-auto-compact",
-  "owner": { "name": "Hoshin" },
+  "owner": { "name": "Ramairus" },
   "description": "Claude Code plugin for approved self-compaction with consistent keep rules.",
   "plugins": [
     {

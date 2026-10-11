@@ -9,7 +9,7 @@ The `smart-auto-compact` plugin gives Claude four tools:
 
 - `mcp__smart-auto-compact__compact { instructions, reason, resume? }` queues a compaction. It runs after the current turn ends, never mid-turn. With `resume`, the plugin submits a prompt after compaction so the work continues by itself.
 - `mcp__smart-auto-compact__set_compact_brief { instructions }` saves what any later compaction must keep, without compacting. Autocompact, which can run mid-turn, and `/compact` both use it.
-- `mcp__smart-auto-compact__request_grant { scope }` asks the user once for permission to compact without asking, until the grant is released.
+- `mcp__smart-auto-compact__request_grant { scope, label }` asks the user once for permission to compact without asking, until the grant is released. `label` is three or four words naming the task (`gradle-port bundles 01-16`); the status line shows it. Keep `scope` to one sentence.
 - `mcp__smart-auto-compact__release_grant` ends the grant.
 
 ## Permission
@@ -22,7 +22,8 @@ The `smart-auto-compact` plugin gives Claude four tools:
 
 ## The task brief
 
-- While a grant is active, or during any long task, keep a brief current with `set_compact_brief`: at the start of the work and at each phase boundary, and again after a compaction once you are oriented.
+- While a grant is active, or during any long task, keep a brief current with `set_compact_brief`: at the start of the work, whenever a step finishes or the user decides something, and again after a compaction once you are oriented. A brief that lags the work loses whatever happened since.
+- The plugin reminds you after a run of tool calls with no new brief. When the work has moved on, replace the brief then; when nothing changed, carry on.
 - The brief takes the same content as `instructions` below. Replace it whole each time; it is not a log.
 - Autocompact can run in the middle of a turn without asking anyone. The brief is how what you know reaches that summary.
 
