@@ -5,7 +5,7 @@ A Claude Code plugin that lets Claude compact its own context, with your approva
 ## Install
 
 ```
-/plugin marketplace add Ramairus/smart-auto-compact
+/plugin marketplace add Ramairus/smart-compact
 /plugin install smart-compact@smart-compact
 ```
 
