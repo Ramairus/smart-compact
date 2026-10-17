@@ -1,22 +1,23 @@
 ---
-name: smart-auto-compact
-description: Rules for compacting this session's context with the smart-auto-compact tools. Load before calling mcp__smart-auto-compact__compact or request_grant, before starting a large multi-step task that may need compaction, or when the user types /smart-auto-compact.
+name: smart-compact
+description: Rules for compacting this session's context with the smart-compact tools. Load before calling mcp__smart-compact__compact or request_grant, before starting a large multi-step task that may need compaction, or when the user types /smart-compact.
 ---
 
-# Custom compact
+# Smart compact
 
-The `smart-auto-compact` plugin gives Claude four tools:
+The `smart-compact` plugin gives Claude four tools:
 
-- `mcp__smart-auto-compact__compact { instructions, reason, resume? }` queues a compaction. It runs after the current turn ends, never mid-turn. With `resume`, the plugin submits a prompt after compaction so the work continues by itself.
-- `mcp__smart-auto-compact__set_compact_brief { instructions }` saves what any later compaction must keep, without compacting. Autocompact, which can run mid-turn, and `/compact` both use it.
-- `mcp__smart-auto-compact__request_grant { scope, label }` asks the user once for permission to compact without asking, until the grant is released. `label` is three or four words naming the task (`gradle-port bundles 01-16`); the status line shows it. Keep `scope` to one sentence.
-- `mcp__smart-auto-compact__release_grant` ends the grant.
+- `mcp__smart-compact__compact { instructions, reason, resume? }` queues a compaction. It runs after the current turn ends, never mid-turn. With `resume`, the plugin submits a prompt after compaction so the work continues by itself.
+- `mcp__smart-compact__set_compact_brief { instructions }` saves what any later compaction must keep, without compacting. Autocompact, which can run mid-turn, and `/compact` both use it.
+- `mcp__smart-compact__request_grant { scope, label }` asks the user once for permission to compact without asking, until the grant is released. `label` is three or four words naming the task (`gradle-port bundles 01-16`); the prompt footer shows it. Keep `scope` to one sentence.
+- `mcp__smart-compact__release_grant` ends the grant.
 
 ## Permission
 
 - Without a grant, `compact` goes to the permission mode's decider: the user's dialog, or in auto mode the classifier. Give a `reason` that stands on its own.
 - Before a large task (many files, a bundle set, a long audit), call `request_grant` with the task as scope, before starting the work.
-- A skill whose body has the line `compact-permission: granted` grants permission when it loads. That covers only the work the skill was loaded for.
+- A skill whose body has the line `SMART-COMPACT:REQUEST_GRANT: <context>` gets its grant from the plugin when it loads: the user is asked, or not at all once they chose "Always" or "Never" for that skill in this project. Don't call `request_grant` for that skill's work; the skill text ends with a note when its grant is active. A skill grant covers only the work the skill was loaded for.
+- A grant from `request_grant` outranks a skill's: a skill loaded under it keeps it. `request_grant` while a skill's grant is active asks the user to widen it.
 - A grant is not a blank cheque. Before each compaction under a grant, the session model judges from the conversation whether the grant still covers the current work, unless the user set grants to be trusted. A grant judged stale, or older than the user's turn limit, is withdrawn and the user sees why.
 - Call `release_grant` when the task the grant covered is done.
 
@@ -43,7 +44,7 @@ The `smart-auto-compact` plugin gives Claude four tools:
 
 ## Always keep
 
-This section is added to every compaction: the `compact` tool, manual `/compact`, and autocompact (with the task brief). A copy of this file at `~/.claude/skills/smart-auto-compact/SKILL.md` overrides it.
+This section is added to every compaction: the `compact` tool, manual `/compact`, and autocompact (with the task brief). A copy of this file at `~/.claude/skills/smart-compact/SKILL.md` overrides it.
 
 - All rules from CLAUDE.md files and from the user's auto-memory that were in effect, and the Session Startup / Workflow Rules they impose.
 - Every skill loaded this session by name, with the rules from it that are in play.
