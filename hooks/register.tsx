@@ -6,7 +6,9 @@ import type { Brief, Grant, PendingCompact, SkillChoices } from '../types'
 const PLUGIN = 'smart-compact'
 const COMPACT_TOOL = `mcp__${PLUGIN}__compact`
 
-const grant = atom({ plugin: 'smart-compact', key: 'grant' } as const, null as Grant | null)
+// Grants by agent loop: MAIN for the main conversation, a subagent's under its agentId.
+const grants = atom({ plugin: 'smart-compact', key: 'grants' } as const, {} as Record<string, Grant>)
+const MAIN = ''
 const brief = atom({ plugin: 'smart-compact', key: 'brief' } as const, null as Brief | null)
 const pending = atom({ plugin: 'smart-compact', key: 'pending' } as const, null as PendingCompact | null)
 const skills = atom({ plugin: 'smart-compact', key: 'skills' } as const, [] as string[])
@@ -17,16 +19,29 @@ const sinceBrief = atom({ plugin: 'smart-compact', key: 'sinceBrief' } as const,
 const shown = atom({ plugin: 'smart-compact', key: 'shown' } as const, {} as Record<string, string>)
 // The session's copy of this project's skill choices kept in $.store, for the pane.
 const choices = atom({ plugin: 'smart-compact', key: 'choices' } as const, { always: [], never: [] } as SkillChoices)
+// Slash commands typed this session: a skill run as `/name` counts as loaded for request_grant.
+const invoked = atom({ plugin: 'smart-compact', key: 'invoked' } as const, [] as string[])
 
 const SKILL_PERMISSION = /^\s*compact-permission:\s*granted\s*$/im
-const GRANT_REQUEST = /^[ \t]*SMART-COMPACT:REQUEST_GRANT[ \t]*:?[ \t]*(.*?)[ \t]*(?:\r?\n|$)/im
+const GRANT_REQUEST = /^[ \t]*SMART-COMPACT:REQUEST_GRANT[ \t]*:?[ \t]*(.*?)[ \t]*$/i
+const FENCE = /^[ \t]*(```|~~~)/
 const RETRIES = 5
 
-// A skill's one-line grant request: its context, and the skill text without the line.
+// A skill's one-line grant request: its context, and the skill text without the line. A line
+// inside a fenced code block is an example (the smart-compact skill shows one), not a request.
 export function parseGrantRequest(text: string): { context: string; text: string } | undefined {
-  const match = GRANT_REQUEST.exec(text)
-  if (!match) return undefined
-  return { context: match[1]!, text: text.slice(0, match.index) + text.slice(match.index + match[0].length) }
+  let fenced = false
+  let at = 0
+  for (const line of text.split('\n')) {
+    const end = at + line.length + 1
+    if (FENCE.test(line)) fenced = !fenced
+    else if (!fenced) {
+      const match = GRANT_REQUEST.exec(line.replace(/\r$/, ''))
+      if (match) return { context: match[1]!, text: text.slice(0, at) + text.slice(end) }
+    }
+    at = end
+  }
+  return undefined
 }
 
 // What a skill's load does to the grant held: a session grant from the user outranks any
@@ -137,9 +152,74 @@ export function grantMode(held: Grant): string {
   return `${PLUGIN}: ${grantLabel(held)}`
 }
 
-async function setGrant($: EngineInterface, next: Grant | null) {
-  await update($, grant, () => next)
+async function grantOf($: EngineInterface, agentId?: string): Promise<Grant | null> {
+  return (await read($, grants))[agentId ?? MAIN] ?? null
 }
+
+async function setGrant($: EngineInterface, next: Grant | null, agentId?: string) {
+  const key = agentId ?? MAIN
+  await update($, grants, map => {
+    const { [key]: _, ...rest } = map
+    return next ? { ...rest, [key]: next } : rest
+  })
+}
+
+async function noteSkill($: EngineInterface, skill: string) {
+  await update($, skills, list => (list.includes(skill) ? list : [...list, skill]))
+}
+
+type SkillGrant = { outcome: 'granted' | 'renewed' | 'kept'; grant: Grant } | { refused: string }
+
+// What a skill's grant request comes to, whether the plugin read the skill's request line
+// itself or Claude passed it on through request_grant. `trustAlways` is false when the
+// plugin cannot tell the skill was loaded, so a saved "Always" alone never grants then.
+async function grantForSkill(
+  $: EngineInterface,
+  skill: string,
+  context: string,
+  how: { canAsk: boolean; trustAlways: boolean; preApproved?: boolean; agentId?: string },
+): Promise<SkillGrant> {
+  const held = await grantOf($, how.agentId)
+  const action = skillGrantAction(held, skill)
+  if (action === 'keep') return { outcome: 'kept', grant: held! }
+  const saved = await loadChoices($)
+  if (!how.preApproved && saved.never.includes(skill)) return { refused: `the user chose "Never" for ${skill} in this project` }
+  if (action === 'grant' && !how.preApproved && !(how.trustAlways && saved.always.includes(skill))) {
+    if (!how.canAsk) return { refused: `no saved "Always" for ${skill} applies, and the request allowed no dialog` }
+    const [always, never] = [`Always for ${skill}`, `Never for ${skill}`]
+    let answer: string
+    try {
+      answer = await $.ui.ask(
+        `Skill ${skill} asks to let Claude compact without asking during its work` +
+          (context ? `: ${context}` : '') +
+          `. Allow it? "Always" and "Never" hold for every load of ${skill} in this project.`,
+        { options: ['Allow', always, 'Not now', never], header: 'Compact' },
+      )
+    } catch {
+      return { refused: 'the question was dismissed, or no one could be asked' }
+    }
+    if (answer === never) await setChoice($, skill, 'never')
+    if (answer !== 'Allow' && answer !== always) return { refused: `the user answered: ${answer}` }
+    if (answer === always) await setChoice($, skill, 'always')
+  }
+  const granted: Grant = {
+    scope: action === 'renew' ? held!.scope : context || `skill ${skill}`,
+    label: action === 'renew' ? held!.label : skill,
+    source: `skill:${skill}`,
+    turn: await read($, turns),
+  }
+  await setGrant($, granted, how.agentId)
+  if (action === 'grant') $.ui.toast(`Compact permission granted for skill ${skill}`)
+  return { outcome: action === 'grant' ? 'granted' : 'renewed', grant: granted }
+}
+
+// Why compact and set_compact_brief refuse in a subagent: the plugin can compact only the
+// main conversation, and the brief is that conversation's.
+export const SUBAGENT_COMPACT =
+  'compact runs on the main conversation only, never a subagent\'s. A subagent is compacted by autocompact; ' +
+  'put what must survive in files or in your final report.'
+export const SUBAGENT_BRIEF =
+  "The brief belongs to the main conversation; a subagent's would overwrite it. Put what must survive in files or in your final report."
 
 // The first line of a long input, cut short for the tool row.
 export function clip(text: string, max = 48): string {
@@ -210,7 +290,7 @@ async function afterCompaction($: EngineInterface) {
     loaded.length
       ? `Skills loaded before compaction: ${loaded.join(', ')}. Re-invoke any you still need with the Skill tool before continuing work that depends on them.`
       : '',
-    (await read($, grant)) ? 'A compact grant is active: refresh the task brief with set_compact_brief once you are oriented.' : '',
+    (await grantOf($)) ? 'A compact grant is active: refresh the task brief with set_compact_brief once you are oriented.' : '',
   ]
     .filter(Boolean)
     .join(' ')
@@ -317,12 +397,26 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'request_grant',
       description:
-        'Asks the user, ahead of a large task, for permission to compact without asking each time until release_grant.',
+        'Asks for permission to compact without asking each time until release_grant. Opens a dialog for the user ' +
+        'unless a grant already applies, a saved skill choice decides it, `ask` is false, or the caller is a subagent. ' +
+        'With `skill`, requests the grant a loaded skill asks for with its SMART-COMPACT:REQUEST_GRANT line.',
       inputSchema: {
         type: 'object',
         properties: {
-          scope: { ...STRING, description: 'The task the grant covers.' },
+          scope: {
+            ...STRING,
+            description: 'The task the grant covers; with `skill`, the text after the skill\'s SMART-COMPACT:REQUEST_GRANT: line.',
+          },
           label: { ...STRING, description: 'Three or four words naming that task, for the prompt footer.' },
+          skill: {
+            ...STRING,
+            description: 'The loaded skill whose SMART-COMPACT:REQUEST_GRANT line this passes on, as the Skill tool names it.',
+          },
+          ask: {
+            type: 'boolean',
+            description:
+              'false: never open a dialog. Only a grant already active or the user\'s saved "Always" for `skill` applies. Default true.',
+          },
         },
         required: ['scope', 'label'],
       },
@@ -348,9 +442,10 @@ export const register: Register = (on, options) => {
   // stale one is withdrawn, and the call goes to the mode's decider: the auto-mode
   // classifier, which reads the conversation and the call's reason, or the user's dialog.
   on('tool.check', { tool: COMPACT_TOOL }, async ($, e, next) => {
+    if (e.agentId) return { decision: 'deny', reason: SUBAGENT_COMPACT }
     const engine = await next(e)
     if (engine.decision === 'deny' || (engine.decision === 'allow' && engine.rule)) return engine
-    const held = await read($, grant)
+    const held = await grantOf($)
     if (!held) return { decision: 'ask', reason: 'No compact grant is active.' }
     const { reason = '' } = (e.input ?? {}) as { reason?: string }
     const verdict = await grantStands($, held, reason, check)
@@ -383,6 +478,7 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: `mcp__${PLUGIN}__set_compact_brief` }, async ($, e) => {
+    if (e.agentId) return { deny: SUBAGENT_BRIEF }
     const { instructions } = e as unknown as { instructions: string }
     const turn = await read($, turns)
     await update($, brief, () => ({ instructions, turn }))
@@ -392,9 +488,34 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: `mcp__${PLUGIN}__request_grant` }, async ($, e) => {
-    const { scope, label } = e as unknown as { scope: string; label?: string }
+    const { scope, label, skill, ask } = e as unknown as { scope: string; label?: string; skill?: string; ask?: boolean }
+    // A subagent never opens a dialog: whoever spawned it passed on their grant, if they held one.
+    const canAsk = ask !== false && !e.agentId
+    if (skill) {
+      // Where skill.prompt passes over this plugin, Claude passes the skill's request line on here.
+      const known = (await read($, skills)).includes(skill) || (await read($, invoked)).includes(skill)
+      const got = await grantForSkill($, skill, scope, { canAsk, trustAlways: known, agentId: e.agentId })
+      if ('refused' in got) return { deny: `Not granted: ${got.refused}.` }
+      await update($, sinceBrief, () => 0)
+      await remember($, e.tool_use_id, `Grant active · ${SHOW}`)
+      return {
+        result:
+          got.outcome === 'kept'
+            ? `A compact grant is already active (${got.grant.scope}); it covers ${skill}'s work.`
+            : `Compact grant active for ${skill}: ${grantLabel(got.grant)}. Keep the task brief current with set_compact_brief.`,
+      }
+    }
+    const current = await grantOf($, e.agentId)
     // A skill's grant may be raised to the user's; the user's own is already the widest.
-    if ((await read($, grant))?.source === 'user') return { result: 'A compact grant is already active.' }
+    if (current?.source === 'user') return { result: 'A compact grant is already active.' }
+    if (!canAsk) {
+      if (current) return { result: `A compact grant is already active (${current.scope}).` }
+      return {
+        deny: e.agentId
+          ? 'Not granted: a subagent cannot ask the user, and the agent that started it held no grant.'
+          : 'Not granted: no grant is active, and the request allowed no dialog.',
+      }
+    }
     let answer: string
     try {
       answer = await $.ui.ask(`Allow Claude to compact without asking during: ${scope}?`, {
@@ -412,10 +533,32 @@ export const register: Register = (on, options) => {
     return { result: `Compact grant active: ${grantLabel(held)}. Keep the task brief current with set_compact_brief.` }
   })
 
-  on('tool.call', { tool: `mcp__${PLUGIN}__release_grant` }, async $ => {
-    await setGrant($, null)
+  on('tool.call', { tool: `mcp__${PLUGIN}__release_grant` }, async ($, e) => {
+    await setGrant($, null, e.agentId)
     return { result: 'Compact grant released.' }
   })
+
+  // Skills loaded through the Skill tool are recorded here as well: where an organization
+  // manages Claude Code, skill.prompt passes over this plugin and records nothing.
+  on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    const out = await next(e)
+    if (out.deny === undefined) await noteSkill($, e.skill)
+    return out
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', async ($, e, next) => {
+    await update($, invoked, list => (list.includes(e.command) ? list : [...list, e.command]))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A subagent starts with its own copy of the grant of the loop that spawned it, so it
+  // never needs a dialog for work that loop was already allowed to do.
+  on('agent.spawn', async ($, e, next) => {
+    const out = await next(e)
+    const held = await grantOf($, e.parentAgentId)
+    if (out.agentId && held) await setGrant($, held, out.agentId)
+    return out
+  }).catch(($, e, next) => next(e))
 
   // While a grant is active or a brief is saved, every briefEvery main-loop tool calls the model
   // gets a reminder, which the user never sees, to bring its brief up to date.
@@ -423,7 +566,7 @@ export const register: Register = (on, options) => {
     const out = await next(e)
     if (briefEvery <= 0 || e.agentId || out.deny !== undefined || e.tool.startsWith(`mcp__${PLUGIN}__`)) return out
     const saved = await read($, brief)
-    if (!saved && !(await read($, grant))) return out
+    if (!saved && !(await grantOf($))) return out
     const calls = (await read($, sinceBrief)) + 1
     if (calls < briefEvery) {
       await update($, sinceBrief, () => calls)
@@ -435,7 +578,7 @@ export const register: Register = (on, options) => {
 
   // Reading the grant while drawing redraws the footer whenever it changes.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    const held = await read($, grant)
+    const held = (await read($, grants))[MAIN]
     return held ? next({ ...e, props: { ...e.props, modes: [...e.props.modes, grantMode(held)] } }) : next(e)
   }).catch(($, e, next) => next(e))
 
@@ -463,12 +606,12 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: BRIEF_COMMAND }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const [saved, held, now] = [await read($, brief), await read($, grant), await read($, turns)]
+    const [saved, held, now] = [await read($, brief), (await read($, grants))[MAIN], await read($, turns)]
     const { always, never } = await read($, choices)
     // Forgetting a skill's "Always" also ends the grant that skill holds now.
     const forget = async (skill: string) => {
       await setChoice($, skill, undefined)
-      if ((await read($, grant))?.source === `skill:${skill}`) await setGrant($, null)
+      if ((await grantOf($))?.source === `skill:${skill}`) await setGrant($, null)
     }
     const listed = (title: string, list: string[]) => (
       <Box flexDirection="column">
@@ -508,42 +651,14 @@ export const register: Register = (on, options) => {
 
   on('skill.prompt', async ($, e, next) => {
     const out = await next(e)
-    await update($, skills, list => (list.includes(e.skill) ? list : [...list, e.skill]))
+    await noteSkill($, e.skill)
     // The plugin reads the request line itself, so it never depends on the model calling request_grant.
     const request = parseGrantRequest(out.text)
     const preApproved = SKILL_PERMISSION.test(out.text)
     if (!request && !preApproved) return out
     const text = request?.text ?? out.text
-    const held = await read($, grant)
-    const action = skillGrantAction(held, e.skill)
-    if (action === 'keep') return { text }
-    const saved = await loadChoices($)
-    if (!preApproved && saved.never.includes(e.skill)) return { text }
-    if (action === 'grant' && !preApproved && !saved.always.includes(e.skill)) {
-      const [always, never] = [`Always for ${e.skill}`, `Never for ${e.skill}`]
-      let answer: string
-      try {
-        answer = await $.ui.ask(
-          `Skill ${e.skill} asks to let Claude compact without asking during its work` +
-            (request!.context ? `: ${request!.context}` : '') +
-            `. Allow it? "Always" and "Never" hold for every load of ${e.skill} in this project.`,
-          { options: ['Allow', always, 'Not now', never], header: 'Compact' },
-        )
-      } catch {
-        return { text } // Dismissed, or no one to ask.
-      }
-      if (answer === never) await setChoice($, e.skill, 'never')
-      if (answer !== 'Allow' && answer !== always) return { text }
-      if (answer === always) await setChoice($, e.skill, 'always')
-    }
-    const granted: Grant = {
-      scope: action === 'renew' ? held!.scope : request?.context || `skill ${e.skill}`,
-      label: action === 'renew' ? held!.label : e.skill,
-      source: `skill:${e.skill}`,
-      turn: await read($, turns),
-    }
-    await setGrant($, granted)
-    if (action === 'grant') $.ui.toast(`Compact permission granted for skill ${e.skill}`)
+    const got = await grantForSkill($, e.skill, request?.context ?? '', { canAsk: true, trustAlways: true, preApproved })
+    if ('refused' in got || got.outcome === 'kept') return { text }
     return {
       text: `${text.trimEnd()}\n\n[smart-compact] A compact grant covers this skill's work. Keep a task brief with set_compact_brief.`,
     }

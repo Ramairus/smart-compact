@@ -13,7 +13,7 @@ export type SkillChoices = { always: string[]; never: string[] }
 declare module 'claude-code' {
   interface PluginState {
     'smart-compact': {
-      grant: Grant | null
+      grants: Record<string, Grant>
       brief: Brief | null
       pending: PendingCompact | null
       skills: string[]
@@ -21,6 +21,7 @@ declare module 'claude-code' {
       sinceBrief: number
       shown: Record<string, string>
       choices: SkillChoices
+      invoked: string[]
     }
   }
 }

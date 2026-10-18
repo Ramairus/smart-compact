@@ -257,6 +257,13 @@ test('reads the grant request line and takes it out of the skill text', () => {
   })
   expect(parseGrantRequest('SMART-COMPACT:REQUEST_GRANT')).toEqual({ context: '', text: '' })
   expect(parseGrantRequest('Mentions SMART-COMPACT:REQUEST_GRANT mid-line.')).toBeUndefined()
+  expect(parseGrantRequest('A.\r\nSMART-COMPACT:REQUEST_GRANT: x\r\nB.')).toEqual({ context: 'x', text: 'A.\r\nB.' })
+})
+
+test('a request line in a code block is an example, not a request', () => {
+  const example = 'Template:\n\n  ```markdown\n  SMART-COMPACT:REQUEST_GRANT: <the work>\n  ```\n'
+  expect(parseGrantRequest(example)).toBeUndefined()
+  expect(parseGrantRequest(`${example}SMART-COMPACT:REQUEST_GRANT: real\nEnd.`)).toEqual({ context: 'real', text: `${example}End.` })
 })
 
 test('a skill never replaces a session grant', () => {
@@ -400,4 +407,90 @@ test('an active grant shows in the footer modes', { options: { grantCheck: 'trus
     await ui.unmount()
     await $.tool.call(RELEASE)
   }
+})
+
+const REQUEST = { tool: 'mcp__smart-compact__request_grant', scope: 'a bundle set, bundle by bundle', label: 'bundles' } as const
+const SKILL_REQUEST = { ...REQUEST, skill: 'bundle-workflow' } as const
+const ALWAYS_BUNDLES = { 'skills:c:/work/proj': { always: ['bundle-workflow'], never: [] } }
+
+// Answers the Skill tool, and every dialog with `answer`, counting the dialogs.
+function tools(on: On, answer = 'Allow') {
+  const asked = { count: 0 }
+  on('tool.call', (_$, e) => {
+    if (e.tool === 'Skill') return { result: 'Launching skill' } as never
+    if (e.tool !== 'AskUserQuestion') return { deny: 'unexpected' }
+    asked.count++
+    return { result: { questions: e.questions, answers: { [e.questions[0]!.question]: answer } } }
+  })
+  return asked
+}
+
+test('request_grant passes on a loaded skill\'s request, and a saved Always grants without a dialog', { options: { grantCheck: 'trust' } }, async ($, on) => {
+  engine(on, undefined, ALWAYS_BUNDLES)
+  const asked = tools(on)
+  await $.tool.call({ tool: 'Skill', skill: 'bundle-workflow' })
+  expect((await $.tool.call({ ...SKILL_REQUEST, ask: false })).result).toContain('Compact grant active for bundle-workflow')
+  expect(asked.count).toBe(0)
+  expect((await $.tool.check(COMPACT)).decision).toBe('allow')
+})
+
+test('a skill typed as a slash command counts as loaded', { options: { grantCheck: 'trust' } }, async ($, on) => {
+  engine(on, undefined, ALWAYS_BUNDLES)
+  on('command.run', () => ({ text: '' }))
+  tools(on)
+  await $.command.run({ command: 'bundle-workflow' })
+  expect((await $.tool.call({ ...SKILL_REQUEST, ask: false })).result).toContain('Compact grant active')
+})
+
+test('a saved Always does not apply to a skill that was never loaded', async ($, on) => {
+  engine(on, undefined, ALWAYS_BUNDLES)
+  const asked = tools(on, 'Not now')
+  expect((await $.tool.call({ ...SKILL_REQUEST, ask: false })).deny).toContain('Not granted')
+  expect(asked.count).toBe(0)
+  await $.tool.call(SKILL_REQUEST)
+  expect(asked.count).toBe(1)
+})
+
+test('a skill request respects a saved Never without a dialog', async ($, on) => {
+  engine(on, undefined, { 'skills:c:/work/proj': { always: [], never: ['bundle-workflow'] } })
+  const asked = tools(on)
+  expect((await $.tool.call(SKILL_REQUEST)).deny).toContain('Never')
+  expect(asked.count).toBe(0)
+})
+
+test('ask false never opens a dialog', async ($, on) => {
+  engine(on)
+  const asked = tools(on)
+  expect((await $.tool.call({ ...REQUEST, ask: false })).deny).toContain('allowed no dialog')
+  expect(asked.count).toBe(0)
+})
+
+test('a subagent inherits the grant of the agent that spawned it, without a dialog', { options: { grantCheck: 'trust' } }, async ($, on) => {
+  engine(on)
+  on('agent.spawn', () => ({ model: 'm', agentId: 'sub1' }))
+  const asked = tools(on)
+  await $.tool.call(REQUEST)
+  await $.agent.spawn({ prompt: 'Run bundle 3.' })
+  expect((await $.tool.call({ ...REQUEST, agentId: 'sub1' })).result).toContain('already active')
+  expect((await $.tool.call({ ...SKILL_REQUEST, agentId: 'sub1' })).result).toContain('already active')
+  expect(asked.count).toBe(1)
+  await $.tool.call({ ...RELEASE, agentId: 'sub1' })
+  expect((await $.tool.check(COMPACT)).decision).toBe('allow')
+})
+
+test('a subagent with nothing to inherit is refused without a dialog', async ($, on) => {
+  engine(on)
+  on('agent.spawn', () => ({ model: 'm', agentId: 'sub1' }))
+  const asked = tools(on)
+  await $.agent.spawn({ prompt: 'Run bundle 3.' })
+  expect((await $.tool.call({ ...REQUEST, agentId: 'sub1' })).deny).toContain('subagent cannot ask')
+  expect(asked.count).toBe(0)
+})
+
+test('a subagent cannot compact the main conversation or overwrite its brief', { options: { grantCheck: 'trust' } }, async ($, on) => {
+  engine(on)
+  tools(on)
+  await $.tool.call(REQUEST)
+  expect((await $.tool.check({ ...COMPACT, agentId: 'sub1' })).decision).toBe('deny')
+  expect((await $.tool.call({ tool: 'mcp__smart-compact__set_compact_brief', instructions: 'x', agentId: 'sub1' })).deny).toBeDefined()
 })
